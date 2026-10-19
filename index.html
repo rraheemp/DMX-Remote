@@ -198,6 +198,9 @@
       <option value="170">Sound 3</option>
     </select>
   </div>
+  <div class="hint" id="autoWarn" style="display:none;color:#ffb3b3">Built-in programs move the heads themselves – the eye-protection zone cannot blank them.</div>
+  <button class="btn" id="resetBtn" style="width:100%;margin-top:10px">Reset fixture</button>
+  <div class="hint" id="resetHint" style="margin-top:6px">Re-homes the selected head(s). Beam stays dark for 15 s.</div>
 </section>
 
 <section>
@@ -334,7 +337,7 @@
   const PAN_360 = 43690;
   const zones = { A: { F: [], N: [], P: [] }, B: { F: [], N: [], P: [] } };
   let drawing = null;   // { head, pts: [[pan, tilt], ...] } while a shape is being drawn
-  const zcfg = { enabled: 1, margin: 1500, settle: 300, panRate: 14000, tiltRate: 14000 };
+  const zcfg = { enabled: 1, margin: 1500, settle: 300, panRate: 14000, tiltRate: 14000, allowAuto: 0 };
   const blank = { A: false, B: false };
 
   const edgeTilt = (pts, pan) => {
@@ -406,8 +409,11 @@
     for (const k of ['A', 'B']) {
       const def = (zones[k].F.length && zones[k].N.length) || zones[k].P.length;
       const chip = $('chip' + k);
-      chip.textContent = k + ': ' + (!def ? 'no zone' : blank[k] ? 'dark (in zone)' : zcfg.enabled ? 'protected' : 'zone off');
-      chip.classList.toggle('dark', !!blank[k]);
+      const autoOn = heads[k][CH.auto] >= 60;
+      const unprotected = def && autoOn && zcfg.allowAuto;
+      chip.textContent = k + ': ' + (!def ? 'no zone' : unprotected ? 'built-in program – NOT protected'
+        : blank[k] ? 'dark (in zone)' : zcfg.enabled ? 'protected' : 'zone off');
+      chip.classList.toggle('dark', !!blank[k] || unprotected);
     }
     $('zoneCounts').innerHTML = ['A', 'B'].map((k) =>
       `<span class="chip">${k}: far ${zones[k].F.length} · near ${zones[k].N.length}</span>`).join('');
@@ -428,6 +434,7 @@
     if (document.activeElement !== $('zPanRate')) $('zPanRate').value = zcfg.panRate;
     if (document.activeElement !== $('zTiltRate')) $('zTiltRate').value = zcfg.tiltRate;
     $('knob').classList.toggle('dark', !!blank[viewHead()]);
+    $('autoWarn').style.display = heads[viewHead()][CH.auto] >= 60 ? 'block' : 'none';
     drawZone();
   }
   window.addEventListener('resize', drawZone);
@@ -436,8 +443,9 @@
     let m;
     if ((m = line.match(/^Z ([AB]) ([FN])((?: \d+,\d+)*)$/))) {
       zones[m[1]][m[2]] = m[3].trim() ? m[3].trim().split(' ').map((s) => s.split(',').map(Number)) : [];
-    } else if ((m = line.match(/^ZC (\d+) (\d+) (\d+) (\d+) (\d+)$/))) {
-      Object.assign(zcfg, { enabled: +m[1], margin: +m[2], settle: +m[3], panRate: +m[4], tiltRate: +m[5] });
+    } else if ((m = line.match(/^ZC (\d+) (\d+) (\d+) (\d+) (\d+)(?: (\d+))?$/))) {
+      Object.assign(zcfg, { enabled: +m[1], margin: +m[2], settle: +m[3], panRate: +m[4], tiltRate: +m[5],
+                            allowAuto: +(m[6] || 0) });
     } else if ((m = line.match(/^ZPN ([AB]) (\d+)$/))) {
       zones[m[1]].P.length = +m[2];
       for (let i = 0; i < +m[2]; i++) zones[m[1]].P[i] = zones[m[1]].P[i] || [];
@@ -567,7 +575,24 @@
   }
 
   for (const s of sliders) $(s).addEventListener('input', (e) => setCh(s, +e.target.value));
-  $('auto').addEventListener('change', (e) => setCh('auto', +e.target.value));
+  const zoneOn = (k) => zcfg.enabled && ((zones[k].F.length && zones[k].N.length) || zones[k].P.length);
+  $('auto').addEventListener('change', (e) => {
+    const v = +e.target.value;
+    if (v >= 60 && !zcfg.allowAuto && editHeads().some(zoneOn)) {
+      if (!confirm('Built-in Auto/Sound programs move the heads on their own and ignore the eye-protection zone.\n\nRun it anyway, without eye protection?')) {
+        render(); return;                       // put the dropdown back
+      }
+      send('za 1');
+    }
+    setCh('auto', v);
+    if (v < 60 && zcfg.allowAuto && heads.A[CH.auto] < 60 && heads.B[CH.auto] < 60) send('za 0');
+    renderZoneUi();
+  });
+  $('resetBtn').addEventListener('click', () => {
+    const who = target === 'both' ? 'all' : target;
+    const label = target === 'both' ? 'both heads' : 'head ' + target;
+    if (confirm('Reset ' + label + '? It will re-home (pan/tilt sweep to its end stops). The beam is kept dark for 15 s.')) send('reset ' + who);
+  });
 
   // XY pad
   const pad = $('pad');
