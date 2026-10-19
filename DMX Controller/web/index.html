@@ -90,6 +90,31 @@
   .shape-list .chip { display: inline-flex; align-items: center; gap: 6px; }
   .shape-list button { background: none; border: 0; color: var(--bad); font-size: 16px; padding: 0 2px; cursor: pointer; }
   #pad.drawing { cursor: copy; outline: 2px dashed var(--amber); outline-offset: 2px; }
+  .show-top { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+  .transport { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+  .transport .btn { font-size: 18px; padding: 8px 0; }
+  .transport .play { background: var(--ok); border-color: var(--ok); color: #06210f; }
+  #showStatus { font-size: 13px; color: var(--muted); margin: 8px 0 4px; min-height: 18px; }
+  #showStatus.live { color: var(--ok); }
+  .toggles { display: flex; gap: 16px; flex-wrap: wrap; font-size: 14px; color: var(--muted); margin: 8px 0; }
+  .toggles input { accent-color: var(--amber); width: 18px; height: 18px; vertical-align: -3px; margin-right: 6px; }
+  .rec { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 8px; align-items: end; margin-top: 10px; }
+  .rec label { font-size: 12px; color: var(--muted); }
+  .cues { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 6px; }
+  .cue { display: grid; grid-template-columns: 28px 1fr auto; gap: 8px; align-items: center;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; }
+  .cue.now { border-color: var(--ok); box-shadow: inset 3px 0 0 var(--ok); }
+  .cue .n { color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
+  .cue .times { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+  .cue .times input { width: 54px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 4px; font-size: 13px; text-align: center; }
+  .cue .acts { display: flex; gap: 6px; grid-column: 2 / 4; }
+  .cue .acts button { flex: 1; }
+  .cue .acts button { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; min-width: 40px;
+    height: 34px; padding: 0 6px; cursor: pointer; font-size: 13px; }
+  .cue .acts .del { color: var(--bad); }
+  .cue .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; margin-right: 4px; vertical-align: -1px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
   .num { width: 100%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
   .pad-legend { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 6px; }
 
@@ -148,6 +173,35 @@
     <input id="presetName" placeholder="Name this look" maxlength="16">
     <button class="btn" id="saveBtn">Save</button>
   </div>
+</section>
+
+<section>
+  <h2>Shows</h2>
+  <div class="show-top">
+    <select id="showSel"></select>
+    <button class="btn" id="renameBtn">Rename</button>
+  </div>
+  <div class="transport">
+    <button class="btn" id="qPrev" aria-label="Previous cue">⏮</button>
+    <button class="btn play" id="qPlay" aria-label="Play">▶</button>
+    <button class="btn" id="qStop" aria-label="Stop">■</button>
+    <button class="btn" id="qNext" aria-label="Next cue">⏭</button>
+  </div>
+  <div id="showStatus">Stopped</div>
+  <div class="row">
+    <label for="qRate">Speed</label><input type="range" id="qRate" min="10" max="400" step="10" value="100"><output id="qRateOut">100%</output>
+  </div>
+  <div class="toggles">
+    <label><input type="checkbox" id="qLoop">Loop</label>
+    <label><input type="checkbox" id="qBoot">Start this show at power-up</label>
+  </div>
+  <div class="rec">
+    <label>Fade (s)<input class="num" id="recFade" type="number" min="0" max="600" step="0.1" value="1"></label>
+    <label>Hold (s)<input class="num" id="recHold" type="number" min="0" max="600" step="0.1" value="2"></label>
+    <button class="btn primary" id="recBtn">＋ Record cue</button>
+  </div>
+  <div class="hint" style="grid-column:auto;margin:6px 0 0">Records both heads exactly as they are now (position, colour, pattern, dimmer…).</div>
+  <ol class="cues" id="cueList"></ol>
 </section>
 
 <section>
@@ -529,6 +583,122 @@
     $('measOut').textContent = `${axis}: full travel ${sec.toFixed(2)} s → ${rate} units/s (tap Save zone settings)`;
   });
 
+  // ---- Shows (cue lists live on the ESP32; this is the editor) ----
+  const SHOW_MAX = 8;
+  const showsUi = Array.from({ length: SHOW_MAX }, (_, i) => ({ n: 0, loop: 1, name: 'Show ' + (i + 1), cues: [] }));
+  let selShow = 0, play = { show: -1, cue: 0, running: false, rate: 100 }, bootShow = -1;
+  const toHex = (arr) => arr.map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase();
+  const fromHex = (hex) => Array.from({ length: hex.length / 2 }, (_, i) => parseInt(hex.substr(i * 2, 2), 16));
+  const secs = (ms) => (ms / 1000).toFixed(ms % 1000 ? 1 : 0);
+  const COLOR_HINT = ['#fff', '#ff4040', '#40ff70', '#4f7dff', '#ffd23f', '#ff6ad5', '#3ff0ff', '#ff9a2e'];
+
+  function renderShowSel() {
+    const sel = $('showSel');
+    sel.innerHTML = showsUi.map((sh, i) => `<option value="${i}">${i + 1}. ${sh.name.replace(/</g, '&lt;')} (${sh.n})</option>`).join('');
+    sel.value = selShow;
+  }
+
+  function renderShows() {
+    renderShowSel();
+    const sh = showsUi[selShow];
+    $('qLoop').checked = !!sh.loop;
+    $('qBoot').checked = bootShow === selShow;
+    $('qRate').value = play.rate; $('qRateOut').textContent = play.rate + '%';
+    const st = $('showStatus');
+    if (play.show >= 0) {
+      const ps = showsUi[play.show];
+      st.textContent = (play.running ? 'Playing ' : 'Parked on ') + `“${ps.name}” – cue ${play.cue + 1} of ${ps.n}`;
+      st.classList.add('live');
+    } else { st.textContent = 'Stopped – touching any control also stops a running show'; st.classList.remove('live'); }
+
+    const list = $('cueList');
+    if (list.contains(document.activeElement)) {          // don't clobber a time being edited
+      list.querySelectorAll('.cue').forEach((li) => li.classList.toggle('now', play.show === selShow && play.cue === +li.dataset.i));
+      return;
+    }
+    if (!sh.n) { list.innerHTML = '<li class="empty">No cues yet. Set up a look, then tap ＋ Record cue.</li>'; return; }
+    list.innerHTML = sh.cues.slice(0, sh.n).map((c, i) => {
+      const v = c ? fromHex(c.hex) : [];
+      const dimA = v.length ? Math.round(v[7] / 255 * 100) : 0, dimB = v.length ? Math.round(v[18] / 255 * 100) : 0;
+      const sw = v.length && v[4] < 140 ? COLOR_HINT[Math.floor(v[4] / 10) % COLOR_HINT.length] : 'linear-gradient(90deg,#f44,#4f4,#44f)';
+      const now = play.show === selShow && play.cue === i ? ' now' : '';
+      return `<li class="cue${now}" data-i="${i}">
+        <span class="n">${i + 1}</span>
+        <div>
+          <div style="font-size:13px"><span class="sw" style="background:${sw}"></span>A ${dimA}% · B ${dimB}%</div>
+          <div class="times">fade <input data-f="fade" type="number" min="0" step="0.1" value="${c ? secs(c.fade) : 0}">
+            hold <input data-f="hold" type="number" min="0" step="0.1" value="${c ? secs(c.hold) : 0}"></div>
+        </div>
+        <div class="acts">
+          <button data-a="go" title="Go to this cue">Go</button>
+          <button data-a="upd" title="Overwrite with current look">⟳</button>
+          <button data-a="up" title="Move up">↑</button>
+          <button data-a="del" class="del" title="Delete">×</button>
+        </div></li>`;
+    }).join('');
+  }
+
+  function parseShowLine(line) {
+    let m;
+    if ((m = line.match(/^QS (\d+) (\d+) (\d) (.*)$/))) {
+      const sh = showsUi[+m[1]]; if (!sh) return true;
+      sh.n = +m[2]; sh.loop = +m[3]; sh.name = m[4]; sh.cues.length = Math.min(sh.cues.length, sh.n);
+    } else if ((m = line.match(/^QC (\d+) (\d+) (\d+) (\d+) ([0-9A-F]{44})$/))) {
+      const sh = showsUi[+m[1]]; if (sh) sh.cues[+m[2]] = { fade: +m[3], hold: +m[4], hex: m[5] };
+    } else if ((m = line.match(/^QP (-?\d+) (\d+) ([01]) (\d+)$/))) {
+      play = { show: +m[1], cue: +m[2], running: m[3] === '1', rate: +m[4] };
+    } else if ((m = line.match(/^QB (-?\d+)$/))) {
+      bootShow = +m[1];
+    } else return false;
+    renderShows();
+    return true;
+  }
+
+  const lookHex = () => toHex(heads.A.concat(heads.B));
+  const ms = (id) => Math.round(Math.max(0, +$(id).value || 0) * 1000);
+
+  $('showSel').addEventListener('change', (e) => { selShow = +e.target.value; renderShows(); send('ql ' + selShow); });
+  $('renameBtn').addEventListener('click', () => {
+    const name = prompt('Show name', showsUi[selShow].name);
+    if (name && name.trim()) send(`qn ${selShow} ${name.trim().slice(0, 15)}`);
+  });
+  $('qPlay').addEventListener('click', () => send('qp ' + selShow));
+  $('qStop').addEventListener('click', () => send('qs'));
+  $('qNext').addEventListener('click', () => send('qnext'));
+  $('qPrev').addEventListener('click', () => send('qprev'));
+  $('qRate').addEventListener('input', (e) => { $('qRateOut').textContent = e.target.value + '%'; });
+  $('qRate').addEventListener('change', (e) => send('qrate ' + e.target.value));
+  $('qLoop').addEventListener('change', (e) => send(`qo ${selShow} ${e.target.checked ? 1 : 0}`));
+  $('qBoot').addEventListener('change', (e) => send('qb ' + (e.target.checked ? selShow : -1)));
+  $('recBtn').addEventListener('click', () => {
+    if (showsUi[selShow].n >= 24) { log('show is full (24 cues)'); return; }
+    flushLook(() => send(`qa ${selShow} ${ms('recFade')} ${ms('recHold')} ${lookHex()}`));
+  });
+  // make sure the ESP32 has the latest slider values before recording
+  function flushLook(fn) { dirty.add('A'); dirty.add('B'); setTimeout(fn, 120); }
+
+  $('cueList').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-a]'); if (!b) return;
+    const i = +b.closest('.cue').dataset.i, c = showsUi[selShow].cues[i];
+    if (b.dataset.a === 'go') {
+      send(`qg ${selShow} ${i}`);
+      if (c) { const v = fromHex(c.hex); heads.A = v.slice(0, 11); heads.B = v.slice(11); render(); renderZoneUi(); }
+    } else if (b.dataset.a === 'upd' && c) {
+      if (confirm(`Overwrite cue ${i + 1} with the current look?`)) flushLook(() => send(`qr ${selShow} ${i} ${c.fade} ${c.hold} ${lookHex()}`));
+    } else if (b.dataset.a === 'up' && i > 0) {
+      send(`qm ${selShow} ${i} ${i - 1}`);
+    } else if (b.dataset.a === 'del') {
+      if (confirm(`Delete cue ${i + 1}?`)) send(`qd ${selShow} ${i}`);
+    }
+  });
+  $('cueList').addEventListener('change', (e) => {
+    const inp = e.target.closest('input[data-f]'); if (!inp) return;
+    const i = +inp.closest('.cue').dataset.i, c = showsUi[selShow].cues[i]; if (!c) return;
+    const v = Math.round(Math.max(0, +inp.value || 0) * 1000);
+    const fade = inp.dataset.f === 'fade' ? v : c.fade, hold = inp.dataset.f === 'hold' ? v : c.hold;
+    send(`qr ${selShow} ${i} ${fade} ${hold} ${c.hex}`);
+  });
+
   // ---- Reading / writing head state ----
   const editHeads = () => (target === 'both' ? ['A', 'B'] : [target]);
   const viewHead = () => (target === 'B' ? 'B' : 'A');
@@ -693,6 +863,8 @@
       log('connected');
       send('d');   // read back current DMX state
       send('zg');  // and the eye-protection zones
+      send('ql');  // show list + playback state
+      send('ql ' + selShow);
     } catch (err) {
       if (err.name === 'NotFoundError') { setStatus('No device chosen', false); }
       else { setStatus('Error: ' + err.message, false); device = null; }
@@ -706,6 +878,7 @@
       const line = rxBuf.slice(0, i).trim(); rxBuf = rxBuf.slice(i + 1);
       if (!line) continue;
       if (parseZoneLine(line)) { if (!/^(Z |ZP)/.test(line)) log(line); continue; }
+      if (parseShowLine(line)) { if (/^QP/.test(line) === false && !/^Q[SCB]/.test(line)) log(line); continue; }
       log(line);
       const m = line.match(/^([AB]):((?:\s+\d+){11})$/);   // reply to "d"
       if (m) { heads[m[1]] = m[2].trim().split(/\s+/).map(Number); render(); }
@@ -745,6 +918,7 @@
   renderPresets();
   render();
   renderZoneUi();
+  renderShows();
 
   // Offline support: cache the app on first visit (only works when served over https)
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {

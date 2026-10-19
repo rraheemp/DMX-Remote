@@ -42,6 +42,20 @@
  *   zg                 report zones/config (lines starting with "Z")
  *   reset <A|B|all>    fixture reset (ch11 held at 255 for 6 s); beam kept dark while it re-homes
  *   help               list commands
+ *
+ * Shows (cue lists, stored in flash, played by the ESP32 itself):
+ *   A cue = both heads' 22 channel values + fade time (glide into it) + hold time.
+ *   Pan/tilt and dimmer fade smoothly (16-bit); colour/pattern/strobe/etc. snap at the
+ *   start of the fade. Values are sent as 44 hex digits (A ch1-11, then B ch1-11).
+ *   qa <s> <fadeMs> <holdMs> <hex>      append cue to show s (0-7)
+ *   qr <s> <i> <fadeMs> <holdMs> <hex>  replace cue i
+ *   qd <s> <i>    delete cue        qm <s> <from> <to>   move cue
+ *   qx <s>        clear show        qn <s> <name>        rename show
+ *   qo <s> <0|1>  loop off/on       ql [s]               list show(s)
+ *   qp <s> [i]    play from cue i   qg <s> <i>           go to cue i and hold there
+ *   qs            stop              qnext / qprev        skip
+ *   qrate <pct>   speed 10-400 %    qb <s|-1>            show to auto-start at power-up
+ *   Any manual change (f, s, z, sweep) stops the show.
  *   A head is dark if it is inside the far/near band OR inside any of its polygons.
  *
  * The zone is applied at the output stage, so it protects every source (sliders,
@@ -305,7 +319,7 @@ static void sceneEndStops() {
 }
 
 // ---------------- Modes ----------------
-enum class Mode { HOLD, SWEEP, MANUAL };
+enum class Mode { HOLD, SWEEP, MANUAL, SHOW };
 static Mode mode = Mode::HOLD;
 static uint32_t modeStart = 0;
 
@@ -520,6 +534,215 @@ static void handleZoneCmd(char *line) {
   }
 }
 
+// ---------------- Shows / cue lists ----------------
+static constexpr int SHOW_MAX = 8, CUE_MAX = 24, CUE_BYTES = 22;
+struct Cue  { uint16_t fadeCs, holdCs; uint8_t v[CUE_BYTES]; };     // times in 1/100 s
+struct Show { char name[16]; uint8_t n; uint8_t loop; Cue c[CUE_MAX]; };
+static Show shows[SHOW_MAX];
+static int8_t bootShow = -1;
+
+static int  curShow = -1, curCue = 0;
+static bool cueHolding = false, goOnly = false;    // goOnly: stay on the cue (no advance)
+static uint32_t phaseStart = 0, phaseElapsed = 0, lastShowTick = 0;
+static uint16_t showRate = 100;                     // %
+static uint8_t fadeFrom[CUE_BYTES];
+
+static void saveShow(int i) {
+  char key[8]; snprintf(key, sizeof(key), "show%d", i);
+  prefs.begin("dmx", false);
+  prefs.putBytes(key, &shows[i], sizeof(Show));
+  prefs.end();
+}
+
+static void loadShows() {
+  prefs.begin("dmx", true);
+  for (int i = 0; i < SHOW_MAX; i++) {
+    char key[8]; snprintf(key, sizeof(key), "show%d", i);
+    memset(&shows[i], 0, sizeof(Show));
+    shows[i].loop = 1;
+    snprintf(shows[i].name, sizeof(shows[i].name), "Show %d", i + 1);
+    if (prefs.getBytesLength(key) == sizeof(Show)) prefs.getBytes(key, &shows[i], sizeof(Show));
+    shows[i].name[15] = 0;
+    if (shows[i].n > CUE_MAX) shows[i].n = 0;
+  }
+  bootShow = prefs.getChar("bootShow", -1);
+  prefs.end();
+}
+
+// slot of channel ch (1-11) for head h, and index into a cue's 22 values
+static inline uint16_t slotOf(int h, int ch) { return HEAD_START[h] + ch - 1; }
+static inline int cueIdx(int h, int ch) { return h * 11 + ch - 1; }
+
+static void reportPlay() {
+  reply("QP %d %d %d %u\n", curShow, curCue, (curShow >= 0 && !goOnly) ? 1 : 0, showRate);
+}
+
+static void startCue(int i) {
+  curCue = i;
+  const Cue &c = shows[curShow].c[i];
+  for (int h = 0; h < 2; h++)
+    for (int ch = 1; ch <= 11; ch++) {
+      fadeFrom[cueIdx(h, ch)] = dmx[slotOf(h, ch)];
+      bool fades = ch == CH_PAN || ch == CH_PAN_FINE || ch == CH_TILT || ch == CH_TILT_FINE || ch == CH_DIMMER;
+      if (!fades) dmx[slotOf(h, ch)] = c.v[cueIdx(h, ch)];          // snap
+    }
+  cueHolding = false;
+  phaseElapsed = 0;
+  reportPlay();
+}
+
+static void playShow(int s, int cue, bool hold) {
+  if (s < 0 || s >= SHOW_MAX || shows[s].n == 0) { reply("ERR: show %d is empty\n", s); return; }
+  curShow = s; goOnly = hold;
+  mode = Mode::SHOW;
+  lastShowTick = millis();
+  startCue(constrain(cue, 0, shows[s].n - 1));
+}
+
+static void stopShow(bool quiet = false) {
+  if (curShow < 0) return;
+  curShow = -1; goOnly = false;
+  if (mode == Mode::SHOW) mode = Mode::MANUAL;
+  if (!quiet) reportPlay();
+}
+
+static void updateShow(uint32_t now) {
+  if (mode != Mode::SHOW || curShow < 0) return;
+  Show &sh = shows[curShow];
+  if (sh.n == 0) { stopShow(); return; }
+  if (curCue >= sh.n) curCue = sh.n - 1;
+  phaseElapsed += (now - lastShowTick) * showRate / 100;
+  lastShowTick = now;
+  const Cue &c = sh.c[curCue];
+
+  if (!cueHolding) {
+    uint32_t fadeMs = c.fadeCs * 10u;
+    float f = fadeMs ? min(1.0f, phaseElapsed / (float)fadeMs) : 1.0f;
+    float e = f * f * (3 - 2 * f);                                    // ease in/out
+    for (int h = 0; h < 2; h++) {
+      for (int ax = 0; ax < 2; ax++) {                                // pan, tilt as 16-bit
+        int ch = ax ? CH_TILT : CH_PAN;
+        int32_t a = (fadeFrom[cueIdx(h, ch)] << 8) | fadeFrom[cueIdx(h, ch + 1)];
+        int32_t b = (c.v[cueIdx(h, ch)] << 8) | c.v[cueIdx(h, ch + 1)];
+        int32_t v = a + (int32_t)((b - a) * e);
+        dmx[slotOf(h, ch)] = v >> 8; dmx[slotOf(h, ch + 1)] = v & 0xFF;
+      }
+      int a = fadeFrom[cueIdx(h, CH_DIMMER)], b = c.v[cueIdx(h, CH_DIMMER)];
+      dmx[slotOf(h, CH_DIMMER)] = a + (int)((b - a) * f);
+    }
+    if (f >= 1.0f) { cueHolding = true; phaseElapsed = 0; }
+    return;
+  }
+  if (goOnly) return;                                                 // parked on this cue
+  if (phaseElapsed >= c.holdCs * 10u) {
+    int next = curCue + 1;
+    if (next >= sh.n) { if (!sh.loop) { stopShow(); return; } next = 0; }
+    startCue(next);
+  }
+}
+
+static bool parseHex(const char *hex, uint8_t *outv) {
+  while (*hex == ' ') hex++;
+  for (int i = 0; i < CUE_BYTES; i++) {
+    unsigned v;
+    if (!isxdigit((unsigned char)hex[0]) || !isxdigit((unsigned char)hex[1])) return false;
+    sscanf(hex, "%2x", &v); outv[i] = v; hex += 2;
+  }
+  return true;
+}
+
+static void reportShowSummary(int i) {
+  reply("QS %d %d %d %s\n", i, shows[i].n, shows[i].loop, shows[i].name);
+}
+
+static void reportShow(int i) {
+  reportShowSummary(i);
+  for (int k = 0; k < shows[i].n; k++) {
+    const Cue &c = shows[i].c[k];
+    char hex[CUE_BYTES * 2 + 1];
+    for (int j = 0; j < CUE_BYTES; j++) snprintf(hex + j * 2, 3, "%02X", c.v[j]);
+    reply("QC %d %d %u %u %s\n", i, k, c.fadeCs * 10u, c.holdCs * 10u, hex);
+  }
+}
+
+static const char *SHOW_HELP =
+  "show cmds (s = show 0-7, i = cue):\n"
+  " qa s fadeMs holdMs hex44 | qr s i fadeMs holdMs hex44\n"
+  " qd s i | qm s from to | qx s | qn s name | qo s 0|1\n"
+  " ql [s] | qp s [i] | qg s i | qs | qnext | qprev\n"
+  " qrate pct | qb s|-1 (power-up show)\n";
+
+static void handleShowCmd(char *line) {
+  int a = -1, b = -1, c = -1, d = -1, used = 0;
+  auto okShow = [](int x) { return x >= 0 && x < SHOW_MAX; };
+  auto toCs = [](int ms) { return (uint16_t)constrain(ms / 10, 0, 65535); };
+
+  if (sscanf(line, "qa %d %d %d %n", &a, &b, &c, &used) == 3 && used && okShow(a)) {
+    Show &sh = shows[a];
+    if (sh.n >= CUE_MAX) { reply("ERR: show full (%d cues)\n", CUE_MAX); return; }
+    Cue cue; cue.fadeCs = toCs(b); cue.holdCs = toCs(c);
+    if (!parseHex(line + used, cue.v)) { reply("ERR: need 44 hex digits\n"); return; }
+    sh.c[sh.n++] = cue; saveShow(a); reportShow(a);
+  } else if (sscanf(line, "qr %d %d %d %d %n", &a, &b, &c, &d, &used) == 4 && used && okShow(a)) {
+    Show &sh = shows[a];
+    if (b < 0 || b >= sh.n) { reply("ERR: no cue %d\n", b); return; }
+    Cue cue; cue.fadeCs = toCs(c); cue.holdCs = toCs(d);
+    if (!parseHex(line + used, cue.v)) { reply("ERR: need 44 hex digits\n"); return; }
+    sh.c[b] = cue; saveShow(a); reportShow(a);
+  } else if (sscanf(line, "qd %d %d", &a, &b) == 2 && okShow(a)) {
+    Show &sh = shows[a];
+    if (b < 0 || b >= sh.n) { reply("ERR: no cue %d\n", b); return; }
+    if (curShow == a) stopShow();
+    for (int k = b; k < sh.n - 1; k++) sh.c[k] = sh.c[k + 1];
+    sh.n--; saveShow(a); reportShow(a);
+  } else if (sscanf(line, "qm %d %d %d", &a, &b, &c) == 3 && okShow(a)) {
+    Show &sh = shows[a];
+    if (b < 0 || b >= sh.n || c < 0 || c >= sh.n) { reply("ERR: bad cue index\n"); return; }
+    Cue t = sh.c[b];
+    if (b < c) for (int k = b; k < c; k++) sh.c[k] = sh.c[k + 1];
+    else       for (int k = b; k > c; k--) sh.c[k] = sh.c[k - 1];
+    sh.c[c] = t; saveShow(a); reportShow(a);
+  } else if (sscanf(line, "qx %d", &a) == 1 && okShow(a)) {
+    if (curShow == a) stopShow();
+    shows[a].n = 0; saveShow(a); reportShow(a);
+  } else if (sscanf(line, "qn %d %n", &a, &used) == 1 && used && okShow(a)) {
+    snprintf(shows[a].name, sizeof(shows[a].name), "%s", line + used);
+    for (char *q = shows[a].name; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+    saveShow(a); reportShowSummary(a);
+  } else if (sscanf(line, "qo %d %d", &a, &b) == 2 && okShow(a)) {
+    shows[a].loop = b ? 1 : 0; saveShow(a); reportShowSummary(a);
+  } else if (strcmp(line, "ql") == 0) {
+    for (int i = 0; i < SHOW_MAX; i++) reportShowSummary(i);
+    reply("QB %d\n", bootShow); reportPlay();
+  } else if (sscanf(line, "ql %d", &a) == 1 && okShow(a)) {
+    reportShow(a);
+  } else if (sscanf(line, "qp %d %d", &a, &b) >= 1 && okShow(a)) {
+    playShow(a, b < 0 ? 0 : b, false);
+  } else if (sscanf(line, "qg %d %d", &a, &b) == 2 && okShow(a)) {
+    playShow(a, b, true);
+  } else if (strcmp(line, "qs") == 0) {
+    stopShow(); if (curShow < 0) reportPlay();
+  } else if (strcmp(line, "qnext") == 0 || strcmp(line, "qprev") == 0) {
+    if (curShow < 0) { reply("no show running\n"); return; }
+    int n = shows[curShow].n, step = line[1] == 'n' ? 1 : -1;
+    startCue((curCue + step + n) % n);
+  } else if (sscanf(line, "qrate %d", &a) == 1) {
+    showRate = constrain(a, 10, 400); reportPlay();
+  } else if (sscanf(line, "qb %d", &a) == 1 && a >= -1 && a < SHOW_MAX) {
+    bootShow = a;
+    prefs.begin("dmx", false); prefs.putChar("bootShow", bootShow); prefs.end();
+    reply("QB %d\n", bootShow);
+  } else {
+    reply("ERR: couldn't parse '%s'\n%s", line, SHOW_HELP);
+  }
+}
+
+// manual control always wins over a running show
+static void manualTakeover() {
+  if (mode == Mode::SHOW) stopShow();
+  mode = Mode::MANUAL;
+}
+
 // ---------------- Commands ----------------
 static void handleLine(char *line) {
   int slot, value;
@@ -535,7 +758,7 @@ static void handleLine(char *line) {
       dmx[sl] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
       p = end;
     }
-    mode = Mode::MANUAL;
+    manualTakeover();
     return;
   }
   if (sscanf(line, "s %d %d", &slot, &value) == 2) {
@@ -544,11 +767,11 @@ static void handleLine(char *line) {
       return;
     }
     dmx[slot] = (uint8_t)value;
-    mode = Mode::MANUAL;
+    manualTakeover();
     reply("slot %d = %d\n", slot, value);
   } else if (strcmp(line, "z") == 0) {
     memset(dmx + 1, 0, DMX_SLOTS);
-    mode = Mode::MANUAL;
+    manualTakeover();
     reply("all slots 0\n");
   } else if (strcmp(line, "d") == 0) {
     for (int head = 0; head < 2; head++) {        // one line per fixture
@@ -573,7 +796,11 @@ static void handleLine(char *line) {
     reply("cmds:\n s slot val | f slot v1 v2.. | z (all 0) | d (dump)\n"
           " sweep | reset A|B|all | help\n");
     reply("%s", ZONE_HELP);
+    reply("%s", SHOW_HELP);
+  } else if (line[0] == 'q' && line[1]) {
+    handleShowCmd(line);
   } else if (strcmp(line, "sweep") == 0) {
+    stopShow(true);
     sceneEndStops();
     mode = Mode::SWEEP;
     modeStart = millis();
@@ -602,9 +829,11 @@ void setup() {
   Serial1.begin(DMX_BAUD, SERIAL_8N2, DMX_RX_PIN, DMX_TX_PIN);
 
   loadZones();
+  loadShows();
   sceneEndStops();
   modeStart = millis();
   bleBegin();
+  if (bootShow >= 0 && shows[bootShow].n > 0) playShow(bootShow, 0, false);   // standalone gig mode
   Serial.println("DMX TX up: HOLD (end stops, white, 50%), BLE advertising as DMX-Controller");
 }
 
@@ -622,6 +851,7 @@ void loop() {
     Serial.println("SWEEP: pan 0 -> 255 -> 0");
   }
   if (mode == Mode::SWEEP) updateSweep(now);
+  updateShow(now);
 
   if (now - lastFrame >= FRAME_PERIOD_MS) {
     float dt = (now - lastFrame) / 1000.0f;
