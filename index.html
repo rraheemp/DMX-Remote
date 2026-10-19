@@ -115,6 +115,19 @@
   .cue .acts .del { color: var(--bad); }
   .cue .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; margin-right: 4px; vertical-align: -1px; }
   .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+  #blackoutBtn { width: 100%; min-height: 56px; font-size: 17px; font-weight: 700; letter-spacing: .08em;
+    background: #2a1416; border: 2px solid #6b2e2e; color: #ffb3b3; border-radius: 12px; margin-bottom: 14px; cursor: pointer; }
+  #blackoutBtn.on { background: var(--bad); border-color: #ff9a9a; color: #fff; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(255,107,107,.25); } }
+  .lock { display: none; background: #1f2433; border: 1px solid #3a4a7a; border-radius: var(--radius); padding: 14px; margin-bottom: 14px; }
+  .lock.on { display: block; }
+  .lock h2 { color: #b9c7ff; }
+  .lock-row { display: flex; gap: 8px; }
+  .lock-row input, .pin-row input { flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px; font-size: 18px; letter-spacing: .3em; }
+  .pin-row { display: flex; gap: 8px; margin-top: 8px; }
+  .lock-row input::placeholder, .pin-row input::placeholder { letter-spacing: normal; font-size: 15px; }
+  #progress { font-size: 13px; color: var(--muted); margin-top: 8px; min-height: 18px; }
   .num { width: 100%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
   .pad-legend { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 6px; }
 
@@ -150,6 +163,18 @@
 </header>
 <div id="scanAllRow" style="margin:-6px 0 14px; font-size:13px; color:var(--muted)">
   Not in the list? <a href="#" id="scanAll" style="color:var(--amber)">Show all Bluetooth devices</a>
+</div>
+
+<button id="blackoutBtn" aria-pressed="false">BLACKOUT</button>
+
+<div class="lock" id="lockCard">
+  <h2>Locked – enter PIN</h2>
+  <form class="lock-row" id="lockForm">
+    <input id="pinIn" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="PIN" autocomplete="off">
+    <button class="btn primary">Unlock</button>
+  </form>
+  <label class="toggles" style="margin:10px 0 0"><input type="checkbox" id="pinRemember" checked>Remember on this phone</label>
+  <div class="hint" id="lockMsg" style="margin-top:6px"></div>
 </div>
 
 <div class="warn" id="noBle">
@@ -322,6 +347,25 @@
     </div>
     <div class="hint" id="measOut" style="margin-top:6px"></div>
   </details>
+</section>
+
+<section>
+  <h2>Settings &amp; backup</h2>
+  <div style="font-size:14px;color:var(--muted)" id="pinState">PIN: unknown until connected</div>
+  <div class="pin-row">
+    <input id="newPin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="New PIN (4–8 digits)" autocomplete="off">
+    <button class="btn" id="setPinBtn">Set PIN</button>
+  </div>
+  <button class="btn" id="clearPinBtn" style="width:100%;margin-top:8px">Remove PIN</button>
+  <div class="hint" style="margin-top:6px">Without a PIN, anyone nearby with a Bluetooth app can control the lights. USB never needs the PIN, so you can't lock yourself out.</div>
+
+  <div class="grid2" style="margin-top:16px">
+    <button class="btn" id="exportBtn">Back up to file</button>
+    <button class="btn" id="importBtn">Restore from file</button>
+  </div>
+  <input type="file" id="importFile" accept=".json,application/json" style="display:none">
+  <div class="hint" style="margin-top:6px">Saves all 8 shows, both eye-protection zones, zone settings, the power-up show and your presets. The PIN is not included.</div>
+  <div id="progress"></div>
 </section>
 
 <section>
@@ -823,7 +867,10 @@
   });
 
   // ---- Bluetooth ----
-  let device = null, rxChar = null, connected = false, busy = false;
+  let device = null, rxChar = null, connected = false, busy = false, authed = false, pinSet = null, blackout = false;
+  const PIN_KEY = 'dmx-pin';
+  const getSavedPin = () => { try { return localStorage.getItem(PIN_KEY) || ''; } catch { return ''; } };
+  const savePinLocal = (p) => { try { p ? localStorage.setItem(PIN_KEY, p) : localStorage.removeItem(PIN_KEY); } catch {} };
   const dirty = new Set();
   const enc = new TextEncoder(), dec = new TextDecoder();
   const sendQueue = [];
@@ -848,7 +895,8 @@
           ? { acceptAllDevices: true, optionalServices: [NUS] }
           : { filters: [{ namePrefix: 'DMX' }, { services: [NUS] }], optionalServices: [NUS] });
         device.addEventListener('gattserverdisconnected', () => {
-          connected = false; rxChar = null; setStatus('Disconnected', false); log('disconnected');
+          connected = false; rxChar = null; authed = false; setStatus('Disconnected', false); log('disconnected');
+          $('lockCard').classList.remove('on');
         });
       }
       setStatus('Connecting…', false);
@@ -861,10 +909,8 @@
       connected = true;
       setStatus('Connected to ' + (device.name || 'device'), true);
       log('connected');
-      send('d');   // read back current DMX state
-      send('zg');  // and the eye-protection zones
-      send('ql');  // show list + playback state
-      send('ql ' + selShow);
+      authed = false;
+      send('auth ' + getSavedPin(), true);   // unlocks if no PIN is set or the saved one is right
     } catch (err) {
       if (err.name === 'NotFoundError') { setStatus('No device chosen', false); }
       else { setStatus('Error: ' + err.message, false); device = null; }
@@ -877,6 +923,7 @@
     while ((i = rxBuf.indexOf('\n')) >= 0) {
       const line = rxBuf.slice(0, i).trim(); rxBuf = rxBuf.slice(i + 1);
       if (!line) continue;
+      if (parseMiscLine(line)) continue;
       if (parseZoneLine(line)) { if (!/^(Z |ZP)/.test(line)) log(line); continue; }
       if (parseShowLine(line)) { if (/^QP/.test(line) === false && !/^Q[SCB]/.test(line)) log(line); continue; }
       log(line);
@@ -885,7 +932,135 @@
     }
   }
 
-  function send(cmd) { sendQueue.push(cmd); log('> ' + cmd, 'tx'); }
+  function send(cmd, quiet) { sendQueue.push(cmd); if (!quiet) log('> ' + cmd, 'tx'); }
+
+  function onUnlocked() {
+    $('lockCard').classList.remove('on');
+    send('d');   // read back current DMX state
+    send('zg');  // eye-protection zones
+    send('ql');  // show list + playback state
+    send('ql ' + selShow);
+    send('bo ?', true);
+  }
+
+  function renderPinState() {
+    $('pinState').textContent = pinSet === null ? 'PIN: unknown until connected'
+      : pinSet ? 'PIN: set – new phones must enter it' : 'PIN: not set – anyone nearby can connect';
+  }
+
+  function parseMiscLine(line) {
+    let m;
+    if ((m = line.match(/^AUTH ([01]) ([01])(?: wait)?$/))) {
+      pinSet = m[2] === '1'; renderPinState();
+      if (m[1] === '1') {
+        if (!authed) { authed = true; onUnlocked(); }
+      } else {
+        authed = false;
+        $('lockCard').classList.add('on');
+        $('lockMsg').textContent = line.endsWith('wait') ? 'Too fast – wait 2 s and try again'
+          : (getSavedPin() || $('pinIn').value) ? 'Wrong PIN' : '';
+        $('pinIn').focus();
+      }
+      return true;
+    }
+    if (line.startsWith('LOCKED')) { authed = false; $('lockCard').classList.add('on'); return true; }
+    if ((m = line.match(/^PINSET ([01])$/))) { pinSet = m[1] === '1'; renderPinState(); return true; }
+    if ((m = line.match(/^BO ([01])$/))) {
+      blackout = m[1] === '1';
+      $('blackoutBtn').classList.toggle('on', blackout);
+      $('blackoutBtn').setAttribute('aria-pressed', blackout);
+      $('blackoutBtn').textContent = blackout ? 'BLACKOUT ON – tap to release' : 'BLACKOUT';
+      return true;
+    }
+    if (/^QUIET [01]$/.test(line)) return true;
+    return false;
+  }
+
+  $('lockForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const p = $('pinIn').value.trim(); if (!p) return;
+    savePinLocal($('pinRemember').checked ? p : '');
+    send('auth ' + p, true); $('pinIn').value = '';
+  });
+  $('setPinBtn').addEventListener('click', () => {
+    const p = $('newPin').value.trim();
+    if (!/^\d{4,8}$/.test(p)) { log('PIN must be 4–8 digits'); return; }
+    send('pin ' + p, true); savePinLocal(p); $('newPin').value = '';
+    log('PIN set – saved on this phone');
+  });
+  $('clearPinBtn').addEventListener('click', () => {
+    if (confirm('Remove the PIN? Anyone nearby will be able to control the lights.')) { send('pin -', true); savePinLocal(''); }
+  });
+  $('blackoutBtn').addEventListener('click', () => {
+    if (!connected) { log('not connected'); return; }
+    send('bo ' + (blackout ? 0 : 1));
+  });
+
+  // ---- Backup / restore ----
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const progress = (t) => { $('progress').textContent = t; };
+
+  $('exportBtn').addEventListener('click', async () => {
+    if (!connected || !authed) { progress('Connect (and unlock) first'); return; }
+    progress('Reading shows from the ESP32…');
+    for (let i = 0; i < SHOW_MAX; i++) { showsUi[i].cues = []; send('ql ' + i, true); }
+    send('zg', true); send('ql', true);
+    const complete = () => showsUi.every((sh) => sh.cues.length === sh.n && sh.cues.every(Boolean));
+    for (let t = 0; t < 150 && !(complete() && sendQueue.length === 0); t++) await sleep(100);
+    if (!complete()) { progress('Timed out reading shows – try again'); return; }
+    await sleep(400);                                   // let the zone report finish
+    const data = {
+      app: 'dmx-remote', version: 1, saved: new Date().toISOString(),
+      shows: showsUi.map((sh) => ({ name: sh.name, loop: sh.loop, cues: sh.cues.slice(0, sh.n) })),
+      bootShow,
+      zones: { A: zones.A, B: zones.B },
+      zoneSettings: { margin: zcfg.margin, settle: zcfg.settle, panRate: zcfg.panRate, tiltRate: zcfg.tiltRate },
+      presets: custom,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'dmx-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    const cues = data.shows.reduce((n, sh) => n + sh.cues.length, 0);
+    progress(`Saved ${a.download}: ${cues} cues in ${data.shows.filter((s) => s.cues.length).length} shows, zones and settings`);
+    renderShows();
+  });
+
+  $('importBtn').addEventListener('click', () => {
+    if (!connected || !authed) { progress('Connect (and unlock) first'); return; }
+    $('importFile').value = ''; $('importFile').click();
+  });
+  $('importFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    let data;
+    try { data = JSON.parse(await file.text()); } catch { progress('That file is not a valid backup'); return; }
+    if (data.app !== 'dmx-remote' || !Array.isArray(data.shows)) { progress('That file is not a DMX Remote backup'); return; }
+    if (!confirm(`Restore “${file.name}”? This replaces ALL shows, zones and zone settings on the controller.`)) return;
+    const cmds = ['quiet 1', 'qs'];
+    data.shows.slice(0, SHOW_MAX).forEach((sh, i) => {
+      cmds.push(`qx ${i}`, `qn ${i} ${(sh.name || 'Show ' + (i + 1)).slice(0, 15)}`, `qo ${i} ${sh.loop ? 1 : 0}`);
+      for (const c of (sh.cues || []).slice(0, 24))
+        if (/^[0-9A-F]{44}$/i.test(c.hex)) cmds.push(`qa ${i} ${c.fade | 0} ${c.hold | 0} ${c.hex.toUpperCase()}`);
+    });
+    for (const k of ['A', 'B']) {
+      const z = (data.zones || {})[k] || {};
+      cmds.push(`zc ${k}`, `zx ${k}`);
+      const pts = (a) => (a || []).map(([p, t]) => `${p | 0},${t | 0}`).join(' ');
+      if ((z.F || []).length) cmds.push(`zf ${k} F ${pts(z.F)}`);
+      if ((z.N || []).length) cmds.push(`zf ${k} N ${pts(z.N)}`);
+      for (const poly of (z.P || []).slice(0, 6)) if (poly.length >= 3) cmds.push(`zp ${k} ${pts(poly.slice(0, 12))}`);
+    }
+    const zs = data.zoneSettings;
+    if (zs) cmds.push(`zs ${zs.margin | 0} ${zs.settle | 0} ${zs.panRate | 0} ${zs.tiltRate | 0}`);
+    cmds.push('qb ' + (Number.isInteger(data.bootShow) ? data.bootShow : -1), 'quiet 0', 'zg', 'ql', 'ql ' + selShow);
+    if (Array.isArray(data.presets)) { custom = data.presets; saveCustom(custom); renderPresets(); }
+    cmds.forEach((c) => send(c, true));
+    const total = sendQueue.length;
+    while (sendQueue.length) { progress(`Restoring… ${total - sendQueue.length} / ${total}`); await sleep(200); }
+    progress(`Restored ${file.name}`);
+  });
 
   async function write(text) {
     const data = enc.encode(text);
@@ -898,7 +1073,7 @@
     if (!connected || busy) return;
     let text = '';
     if (sendQueue.length) text = sendQueue.shift();
-    else if (dirty.size) {
+    else if (dirty.size && authed) {
       text = [...dirty].map((k) => 'f ' + START[k] + ' ' + heads[k].join(' ')).join(';');
       dirty.clear();
     }

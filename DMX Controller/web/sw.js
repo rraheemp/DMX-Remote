@@ -1,5 +1,5 @@
 // DMX Remote offline cache. Bump VERSION when you change any file so phones pick up the update.
-const VERSION = 'dmx-remote-v5';
+const VERSION = 'dmx-remote-v6';
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {

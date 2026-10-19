@@ -11,9 +11,8 @@
  * Fixtures: CHnd = 11CH, Addr = A001 (both, mirrored) or A001 / A012 (independent).
  *
  * Behaviour on boot:
- *   1. HOLD  : both heads at end stop, white, fixed pattern, no strobe, ~50% dimmer
- *   2. SWEEP : after HOLD_MS, pan coarse sweeps 0 -> 255 -> 0 forever
- *   Any serial command switches to MANUAL mode (sweep stops).
+ *   If a power-up show is set (qb), it starts playing. Otherwise both heads go to centre
+ *   with the dimmer at 0 (dark) and wait for commands.
  *
  * Commands work from USB serial (115200, newline-terminated) or over BLE:
  *   BLE: device "DMX-Controller", Nordic UART Service (NUS). Use any BLE UART app
@@ -42,6 +41,11 @@
  *   zg                 report zones/config (lines starting with "Z")
  *   reset <A|B|all>    fixture reset (ch11 held at 255 for 6 s); beam kept dark while it re-homes
  *   help               list commands
+ *   bo <0|1|?>         blackout: force both dimmers to 0 at the output (works over shows)
+ *   auth <pin>         unlock this BLE connection (needed when a PIN is set)
+ *   pin <4-8 digits>   set the PIN (pin - clears it). USB serial never needs a PIN.
+ *   quiet <0|1>        suppress bulky zone/show reports (used for restore)
+ *   zf <A|B> <F|N> p,t p,t ...  set a far/near edge directly (used for restore)
  *
  * Shows (cue lists, stored in flash, played by the ESP32 itself):
  *   A cue = both heads' 22 channel values + fade time (glide into it) + hold time.
@@ -124,6 +128,8 @@ static HeadPolys polys[2];
 static Zone zones[2];
 static ZoneCfg zcfg;
 static bool allowAuto = false;                 // za 1: let built-in programs run unprotected
+static bool blackout = false;                  // bo 1: everything dark at the output
+static bool quietMode = false;                 // quiet 1: skip bulky reports during restore
 static constexpr uint32_t RESET_HOLD_MS = 6000, RESET_DARK_MS = 15000;
 static uint32_t resetStart[2] = {0, 0};        // 0 = no reset running
 static Preferences prefs;
@@ -280,7 +286,7 @@ static void sendFrame() {
   uint32_t now = millis();
   for (int h = 0; h < 2; h++) {
     uint16_t s = HEAD_START[h];
-    if (blanked[h]) out[s + CH_DIMMER - 1] = 0;                        // beam off
+    if (blanked[h] || blackout) out[s + CH_DIMMER - 1] = 0;            // beam off
     if (zoneActive(h) && !allowAuto && out[s + CH_AUTO - 1] >= 60)
       out[s + CH_AUTO - 1] = 0;                                        // no built-in shows
     if (resetStart[h]) {
@@ -313,6 +319,13 @@ static void setHead(uint16_t start, uint16_t pan16, uint16_t tilt16) {
   setCh(start, CH_RESET,   0);    // never 250-255 (resets after 5 s)
 }
 
+static void sceneDark() {          // power-up default: centred, dimmer 0
+  setHead(HEAD_A, 0x8000, 0x8000);
+  setHead(HEAD_B, 0x8000, 0x8000);
+  setCh(HEAD_A, CH_DIMMER, 0);
+  setCh(HEAD_B, CH_DIMMER, 0);
+}
+
 static void sceneEndStops() {
   setHead(HEAD_A, 0x0000, 0x0000);  // unit A at one end
   setHead(HEAD_B, 0xFFFF, 0xFFFF);  // unit B at the opposite end (if addressed A012)
@@ -320,7 +333,7 @@ static void sceneEndStops() {
 
 // ---------------- Modes ----------------
 enum class Mode { HOLD, SWEEP, MANUAL, SHOW };
-static Mode mode = Mode::HOLD;
+static Mode mode = Mode::MANUAL;
 static uint32_t modeStart = 0;
 
 static void updateSweep(uint32_t now) {
@@ -345,12 +358,12 @@ static volatile int bleClients = 0;     // phone + PC can be connected at the sa
 // BLE callbacks run in the Bluetooth task, so incoming commands are queued and
 // executed in loop() - no DMX buffer access from two tasks at once.
 static constexpr size_t CMD_LEN = 200;
-struct Cmd { char text[CMD_LEN]; };
+struct Cmd { int16_t conn; char text[CMD_LEN]; };     // conn = BLE connection id, -1 = USB
 static QueueHandle_t cmdQueue;
 
-static void queueCommands(const char *data, size_t len) {
+static void queueCommands(int conn, const char *data, size_t len) {
   // one BLE write may hold several commands separated by \n, \r or ';'
-  Cmd c; size_t n = 0;
+  Cmd c; c.conn = conn; size_t n = 0;
   for (size_t i = 0; i <= len; i++) {
     char ch = (i < len) ? data[i] : '\n';
     if (ch == '\n' || ch == '\r' || ch == ';') {
@@ -361,21 +374,29 @@ static void queueCommands(const char *data, size_t len) {
   }
 }
 
+// Per-connection unlock state (bit n = BLE connection id n has sent the right PIN)
+static volatile uint32_t authMask = 0;
+static uint32_t authFailAt[32] = {0};
+static char pinCode[9] = "";                // empty = no PIN, everyone may control
+static int curConn = -1;                     // connection of the command being handled
+
 class ServerCB : public BLEServerCallbacks {
-  void onConnect(BLEServer *) override {
+  void onConnect(BLEServer *, esp_ble_gatts_cb_param_t *param) override {
     bleClients++;
+    authMask &= ~(1u << (param->connect.conn_id & 31));
     BLEDevice::startAdvertising();           // stay visible so another phone/PC can join
   }
-  void onDisconnect(BLEServer *) override {
+  void onDisconnect(BLEServer *, esp_ble_gatts_cb_param_t *param) override {
     if (bleClients > 0) bleClients--;
+    authMask &= ~(1u << (param->disconnect.conn_id & 31));
     BLEDevice::startAdvertising();
   }
 };
 
 class RxCB : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *ch) override {
+  void onWrite(BLECharacteristic *ch, esp_ble_gatts_cb_param_t *param) override {
     auto v = ch->getValue();                 // std::string (core 2.x) or String (core 3.x)
-    queueCommands(v.c_str(), v.length());
+    queueCommands(param->write.conn_id & 31, v.c_str(), v.length());
   }
 };
 
@@ -425,6 +446,7 @@ static void reply(const char *fmt, ...) {
 static int headIndex(char c) { return (c == 'A' || c == 'a') ? 0 : (c == 'B' || c == 'b') ? 1 : -1; }
 
 static void reportZones() {
+  if (quietMode) return;
   for (int h = 0; h < 2; h++) {
     int k = 0;
     for (int i = 0; i < POLY_MAX; i++) if (polys[h].p[i].n >= 3) k++;
@@ -471,6 +493,19 @@ static void handleZoneCmd(char *line) {
     if (ec == 'F' || ec == 'f') addPoint(zones[h].far, zones[h].nFar, pan, tilt);
     else if (ec == 'N' || ec == 'n') addPoint(zones[h].near_, zones[h].nNear, pan, tilt);
     else { reply("ERR: zm <A|B> <F|N>\n"); return; }
+    saveZones();
+    reportZones();
+  } else if (sscanf(line, "zf %c %c", &hc, &ec) == 2 && headIndex(hc) >= 0 && strchr("FfNn", ec)) {
+    int h = headIndex(hc); bool isFar = (ec == 'F' || ec == 'f');
+    ZonePt *pts = isFar ? zones[h].far : zones[h].near_;
+    uint8_t &n = isFar ? zones[h].nFar : zones[h].nNear;
+    n = 0;
+    char *pp = line + 6;
+    unsigned pan, tilt; int used = 0;
+    while (sscanf(pp, " %u,%u%n", &pan, &tilt, &used) == 2) {
+      addPoint(pts, n, (uint16_t)min(pan, 65535u), (uint16_t)min(tilt, 65535u));
+      pp += used;
+    }
     saveZones();
     reportZones();
   } else if (sscanf(line, "zp %c", &hc) == 1 && headIndex(hc) >= 0) {
@@ -526,7 +561,7 @@ static void handleZoneCmd(char *line) {
   } else {
     // explain what was wrong instead of a bare error
     char key[8]; snprintf(key, sizeof(key), " %s ", name);
-    bool known = strstr(" zm zc zp zx ze za zs zg ", key) != nullptr;
+    bool known = strstr(" zm zc zp zx ze za zs zg zf ", key) != nullptr;
     if (!known) reply("unknown zone command '%s'\n", name);
     else if (nargs == 0) reply("'%s' needs arguments\n", name);
     else reply("ERR: couldn't parse '%s'\n", line);
@@ -656,6 +691,7 @@ static void reportShowSummary(int i) {
 }
 
 static void reportShow(int i) {
+  if (quietMode) return;
   reportShowSummary(i);
   for (int k = 0; k < shows[i].n; k++) {
     const Cue &c = shows[i].c[k];
@@ -743,9 +779,69 @@ static void manualTakeover() {
   mode = Mode::MANUAL;
 }
 
+// ---------------- PIN ----------------
+static void loadPin() {
+  prefs.begin("dmx", true);
+  String p = prefs.getString("pin", "");
+  prefs.end();
+  snprintf(pinCode, sizeof(pinCode), "%s", p.c_str());
+}
+
+static void savePin() {
+  prefs.begin("dmx", false);
+  prefs.putString("pin", pinCode);
+  prefs.end();
+}
+
+static bool connAuthed(int conn) {
+  return conn < 0 || pinCode[0] == 0 || (authMask & (1u << (conn & 31)));
+}
+
 // ---------------- Commands ----------------
 static void handleLine(char *line) {
   int slot, value;
+  if (strncmp(line, "auth", 4) == 0 && (line[4] == ' ' || line[4] == 0)) {
+    const char *given = line + 4; while (*given == ' ') given++;
+    uint32_t now = millis();
+    if (curConn >= 0 && authFailAt[curConn & 31] && now - authFailAt[curConn & 31] < 2000) {
+      reply("AUTH 0 %d wait\n", pinCode[0] ? 1 : 0); return;          // slow down guessing
+    }
+    if (pinCode[0] == 0 || strcmp(given, pinCode) == 0) {
+      if (curConn >= 0) authMask |= (1u << (curConn & 31));
+      reply("AUTH 1 %d\n", pinCode[0] ? 1 : 0);
+    } else {
+      if (curConn >= 0) authFailAt[curConn & 31] = now ? now : 1;
+      reply("AUTH 0 %d\n", pinCode[0] ? 1 : 0);
+    }
+    return;
+  }
+  if (!connAuthed(curConn)) {
+    static uint32_t lastLockedMsg = 0;
+    if (millis() - lastLockedMsg > 1000) { lastLockedMsg = millis(); reply("LOCKED - send: auth <pin>\n"); }
+    return;
+  }
+  if (strncmp(line, "pin ", 4) == 0) {
+    const char *np = line + 4; while (*np == ' ') np++;
+    if (strcmp(np, "-") == 0) { pinCode[0] = 0; savePin(); reply("PIN cleared\nPINSET 0\n"); return; }
+    size_t L = strlen(np); bool digits = L >= 4 && L <= 8;
+    for (size_t i = 0; i < L && digits; i++) digits = isdigit((unsigned char)np[i]);
+    if (!digits) { reply("ERR: PIN must be 4-8 digits (pin - to clear)\n"); return; }
+    snprintf(pinCode, sizeof(pinCode), "%s", np); savePin();
+    if (curConn >= 0) authMask |= (1u << (curConn & 31));
+    reply("PIN set\nPINSET 1\n");
+    return;
+  }
+  if (strncmp(line, "bo", 2) == 0 && (line[2] == ' ' || line[2] == 0)) {
+    char a = line[2] ? line[3] : '?';
+    if (a == '1') blackout = true; else if (a == '0') blackout = false; else if (a == 't') blackout = !blackout;
+    reply("BO %d\n", blackout ? 1 : 0);
+    return;
+  }
+  if (sscanf(line, "quiet %d", &value) == 1) {
+    quietMode = value != 0;
+    reply("QUIET %d\n", quietMode ? 1 : 0);
+    return;
+  }
   if (line[0] == 'f' && line[1] == ' ') {          // bulk set, no reply
     char *p = line + 2;
     char *end;
@@ -794,7 +890,7 @@ static void handleLine(char *line) {
     reply("RESET %s: ch11=255 for 6 s, beam dark for 15 s\n", a && b ? "A+B" : a ? "A" : "B");
   } else if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
     reply("cmds:\n s slot val | f slot v1 v2.. | z (all 0) | d (dump)\n"
-          " sweep | reset A|B|all | help\n");
+          " sweep | reset A|B|all | bo 0|1|? | auth pin | pin 1234|- | help\n");
     reply("%s", ZONE_HELP);
     reply("%s", SHOW_HELP);
   } else if (line[0] == 'q' && line[1]) {
@@ -830,11 +926,13 @@ void setup() {
 
   loadZones();
   loadShows();
-  sceneEndStops();
+  loadPin();
+  sceneDark();
   modeStart = millis();
   bleBegin();
   if (bootShow >= 0 && shows[bootShow].n > 0) playShow(bootShow, 0, false);   // standalone gig mode
-  Serial.println("DMX TX up: HOLD (end stops, white, 50%), BLE advertising as DMX-Controller");
+  Serial.println(mode == Mode::SHOW ? "DMX TX up: playing power-up show, BLE advertising as DMX-Controller"
+                                    : "DMX TX up: dark and waiting, BLE advertising as DMX-Controller");
 }
 
 void loop() {
@@ -843,7 +941,9 @@ void loop() {
 
   pollSerial();
   Cmd c;
-  while (xQueueReceive(cmdQueue, &c, 0) == pdTRUE) handleLine(c.text);   // BLE commands
+  while (xQueueReceive(cmdQueue, &c, 0) == pdTRUE) {                       // BLE commands
+    curConn = c.conn; handleLine(c.text); curConn = -1;
+  }
 
   if (mode == Mode::HOLD && now - modeStart >= HOLD_MS) {
     mode = Mode::SWEEP;
