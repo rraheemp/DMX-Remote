@@ -70,6 +70,27 @@
     background: radial-gradient(circle, #fff3d6 0 25%, var(--amber) 45%, rgba(255,181,71,0) 72%);
     pointer-events: none; }
   #pad .ghost { opacity: .35; filter: hue-rotate(160deg); }
+  #pad canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #pad .knob.dark { background: radial-gradient(circle, #3a3d45 0 30%, rgba(90,95,105,.6) 50%, rgba(0,0,0,0) 72%); }
+  .zone-banner { display: none; background: #3a2a10; border: 1px solid var(--amber-dim); color: #ffd99a;
+    border-radius: 10px; padding: 9px 12px; font-size: 13px; margin-bottom: 10px; }
+  .zone-banner.on { display: block; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .chip { border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; }
+  .chip.dark { border-color: var(--bad); color: #ffb3b3; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .steps { margin: 0 0 12px; padding-left: 20px; color: var(--muted); font-size: 13px; }
+  .steps li { margin-bottom: 4px; }
+  .steps b { color: var(--text); font-weight: 600; }
+  .btn.on { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 6px 0; }
+  .tabs { display: grid; grid-template-columns: 1fr 1fr; margin-bottom: 12px; }
+  .shape-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .shape-list .chip { display: inline-flex; align-items: center; gap: 6px; }
+  .shape-list button { background: none; border: 0; color: var(--bad); font-size: 16px; padding: 0 2px; cursor: pointer; }
+  #pad.drawing { cursor: copy; outline: 2px dashed var(--amber); outline-offset: 2px; }
+  .num { width: 100%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
   .pad-legend { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 6px; }
 
   .row { display: grid; grid-template-columns: 78px 1fr 64px; align-items: center; gap: 10px; min-height: 44px; }
@@ -131,8 +152,10 @@
 
 <section>
   <h2>Position</h2>
-  <div id="pad"><div class="knob ghost" id="knobB"></div><div class="knob" id="knob"></div></div>
+  <div class="zone-banner" id="zoneOffBanner">Setup mode: eye-protection zone is OFF. The beam is not blanked anywhere.</div>
+  <div id="pad"><canvas id="zoneCanvas"></canvas><div class="knob ghost" id="knobB"></div><div class="knob" id="knob"></div></div>
   <div class="pad-legend"><span>← pan →</span><span>drag to aim · up/down = tilt</span></div>
+  <div class="chips"><span class="chip" id="chipA">A: no zone</span><span class="chip" id="chipB">B: no zone</span></div>
   <div class="row" style="margin-top:8px">
     <label for="pan">Pan</label><input type="range" id="pan" min="0" max="65535"><output id="panOut"></output>
   </div>
@@ -175,6 +198,76 @@
       <option value="170">Sound 3</option>
     </select>
   </div>
+  <div class="hint" id="autoWarn" style="display:none;color:#ffb3b3">Built-in programs move the heads themselves – the eye-protection zone cannot blank them.</div>
+  <button class="btn" id="resetBtn" style="width:100%;margin-top:10px">Reset fixture</button>
+  <div class="hint" id="resetHint" style="margin-top:6px">Re-homes the selected head(s). Beam stays dark for 15 s.</div>
+</section>
+
+<section>
+  <h2>Eye-protection zone</h2>
+  <div class="seg tabs" id="zoneTabs">
+    <button data-m="aim" class="on">Aim &amp; mark</button>
+    <button data-m="draw">Draw shapes</button>
+  </div>
+  <div id="drawPanel" style="display:none">
+    <ol class="steps">
+      <li>Pick <b>Head A</b> or <b>Head B</b> at the top of the page.</li>
+      <li>Tap <b>New shape</b>, then tap the corners of the area to exclude on the position pad above. The light does not move while you draw.</li>
+      <li>Tap <b>Save shape</b> (3–12 corners). It is active straight away. Add up to 6 shapes per head.</li>
+    </ol>
+    <div class="grid2">
+      <button class="btn" id="newShapeBtn">New shape</button>
+      <button class="btn" id="saveShapeBtn" disabled>Save shape</button>
+      <button class="btn" id="undoPtBtn" disabled>Undo corner</button>
+      <button class="btn" id="cancelShapeBtn" disabled>Cancel</button>
+    </div>
+    <div class="hint" id="drawHint" style="margin-top:6px"></div>
+    <div class="shape-list" id="shapeList"></div>
+  </div>
+  <div id="aimPanel">
+  <ol class="steps">
+    <li>Tap <b>Start setup</b>. The zone switches off so you can see the beam everywhere.</li>
+    <li>Pick <b>Head A</b> or <b>Head B</b> at the top of the page.</li>
+    <li>With someone standing in the crowd area, aim the beam at <b>eye level at the back</b> and tap <b>Mark far edge</b>.</li>
+    <li>Aim at <b>eye level of the front row</b> and tap <b>Mark near edge</b>.</li>
+    <li>Repeat 3 and 4 at the left side, centre and right side of the crowd (3–5 positions).</li>
+    <li>Do the other head, then tap <b>Finish setup</b>. The shaded band on the pad is where the beam goes dark.</li>
+  </ol>
+  <div class="grid2">
+    <button class="btn" id="setupBtn">Start setup</button>
+    <button class="btn" id="clearZoneBtn">Clear this head</button>
+    <button class="btn" id="markFarBtn">Mark far edge</button>
+    <button class="btn" id="markNearBtn">Mark near edge</button>
+  </div>
+  <div class="chips" id="zoneCounts"></div>
+  </div>
+
+  <details>
+    <summary>Margin, timing and motor speed</summary>
+    <div class="row">
+      <label for="zMargin">Margin</label><input type="range" id="zMargin" min="0" max="6000" step="100"><output id="zMarginOut"></output>
+    </div>
+    <div class="hint">extra tilt above and below the band</div>
+    <div class="row">
+      <label for="zSettle">Settle</label><input type="range" id="zSettle" min="0" max="1500" step="50"><output id="zSettleOut"></output>
+    </div>
+    <div class="hint">stays dark this long after clearing the band</div>
+    <div class="grid2" style="margin-top:8px">
+      <label style="font-size:13px;color:var(--muted)">Pan speed (units/s)<input class="num" id="zPanRate" type="number" min="500" max="65535"></label>
+      <label style="font-size:13px;color:var(--muted)">Tilt speed (units/s)<input class="num" id="zTiltRate" type="number" min="500" max="65535"></label>
+    </div>
+    <button class="btn" id="zSaveBtn" style="width:100%;margin-top:8px">Save zone settings</button>
+
+    <p style="font-size:13px;color:var(--muted);margin:14px 0 8px">Measure motor speed with the selected head (speed slider at 0):
+      1 tap <b>Go to start</b>, wait until it stops; 2 tap <b>Go!</b>; 3 tap <b>Arrived</b> the moment it stops.</p>
+    <div class="grid2">
+      <select id="measAxis"><option value="pan">Pan</option><option value="tilt">Tilt</option></select>
+      <button class="btn" id="measStart">Go to start</button>
+      <button class="btn" id="measGo">Go!</button>
+      <button class="btn" id="measDone">Arrived</button>
+    </div>
+    <div class="hint" id="measOut" style="margin-top:6px"></div>
+  </details>
 </section>
 
 <section>
@@ -240,6 +333,202 @@
     logEl.scrollTop = logEl.scrollHeight;
   };
 
+  // ---- Eye-protection zone (mirror of the ESP32's copy) ----
+  const PAN_360 = 43690;
+  const zones = { A: { F: [], N: [], P: [] }, B: { F: [], N: [], P: [] } };
+  let drawing = null;   // { head, pts: [[pan, tilt], ...] } while a shape is being drawn
+  const zcfg = { enabled: 1, margin: 1500, settle: 300, panRate: 14000, tiltRate: 14000, allowAuto: 0 };
+  const blank = { A: false, B: false };
+
+  const edgeTilt = (pts, pan) => {
+    if (pan <= pts[0][0]) return pts[0][1];
+    if (pan >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
+    for (let i = 1; i < pts.length; i++) {
+      if (pan <= pts[i][0]) {
+        const [p0, t0] = pts[i - 1], [p1, t1] = pts[i];
+        return t0 + (t1 - t0) * (pan - p0) / (p1 - p0);
+      }
+    }
+    return pts[pts.length - 1][1];
+  };
+  const zoneBand = (k, pan) => {
+    const z = zones[k]; if (!z.F.length || !z.N.length) return null;
+    const lo = Math.min(z.F[0][0], z.N[0][0]), hi = Math.max(z.F[z.F.length - 1][0], z.N[z.N.length - 1][0]);
+    if (pan < lo && pan + PAN_360 <= hi) pan += PAN_360;
+    else if (pan > hi && pan - PAN_360 >= lo) pan -= PAN_360;
+    const a = edgeTilt(z.F, pan), b = edgeTilt(z.N, pan);
+    return [Math.min(a, b) - zcfg.margin, Math.max(a, b) + zcfg.margin];
+  };
+
+  function drawZone() {
+    const c = $('zoneCanvas'), r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    c.width = Math.round(r.width * dpr); c.height = Math.round(r.height * dpr);
+    const g = c.getContext('2d'); g.clearRect(0, 0, c.width, c.height);
+    const k = viewHead(), z = zones[k];
+    const toY = (t) => (1 - t / 65535) * c.height;
+    if (z.F.length && z.N.length) {
+      g.fillStyle = zcfg.enabled ? 'rgba(255,90,90,0.28)' : 'rgba(255,90,90,0.12)';
+      for (let x = 0; x < c.width; x += 2) {
+        const band = zoneBand(k, x / c.width * 65535);
+        const y1 = toY(band[1]), y0 = toY(band[0]);
+        g.fillRect(x, y1, 2, y0 - y1);
+      }
+    }
+    const toX = (p) => p / 65535 * c.width;
+    const polyPath = (pts, shift) => {
+      g.beginPath();
+      pts.forEach(([p, t], i) => (i ? g.lineTo : g.moveTo).call(g, toX(p + shift), toY(t)));
+      g.closePath();
+    };
+    for (const shape of z.P) {
+      for (const shift of [0, PAN_360, -PAN_360]) {          // same direction exists 360 deg away
+        polyPath(shape, shift);
+        g.fillStyle = shift ? 'rgba(255,90,90,0.12)' : (zcfg.enabled ? 'rgba(255,90,90,0.30)' : 'rgba(255,90,90,0.14)');
+        g.fill();
+        if (!shift) { g.strokeStyle = 'rgba(255,120,120,0.9)'; g.lineWidth = 1.5 * dpr; g.stroke(); }
+      }
+    }
+    if (drawing && drawing.head === k && drawing.pts.length) {
+      g.strokeStyle = '#ffb547'; g.lineWidth = 2 * dpr; g.setLineDash([6 * dpr, 4 * dpr]);
+      g.beginPath();
+      drawing.pts.forEach(([p, t], i) => (i ? g.lineTo : g.moveTo).call(g, toX(p), toY(t)));
+      if (drawing.pts.length > 2) g.closePath();
+      g.stroke(); g.setLineDash([]);
+      g.fillStyle = '#ffb547';
+      for (const [p, t] of drawing.pts) { g.beginPath(); g.arc(toX(p), toY(t), 5 * dpr, 0, 7); g.fill(); }
+    }
+    const dots = (pts, col) => { g.fillStyle = col; for (const [p, t] of pts) {
+      g.beginPath(); g.arc(p / 65535 * c.width, toY(t), 4 * dpr, 0, 7); g.fill(); } };
+    dots(z.F, '#7fb3ff'); dots(z.N, '#ffd36b');
+  }
+
+  function renderZoneUi() {
+    $('zoneOffBanner').classList.toggle('on', !zcfg.enabled);
+    $('setupBtn').textContent = zcfg.enabled ? 'Start setup' : 'Finish setup';
+    $('setupBtn').classList.toggle('on', !zcfg.enabled);
+    for (const k of ['A', 'B']) {
+      const def = (zones[k].F.length && zones[k].N.length) || zones[k].P.length;
+      const chip = $('chip' + k);
+      const autoOn = heads[k][CH.auto] >= 60;
+      const unprotected = def && autoOn && zcfg.allowAuto;
+      chip.textContent = k + ': ' + (!def ? 'no zone' : unprotected ? 'built-in program – NOT protected'
+        : blank[k] ? 'dark (in zone)' : zcfg.enabled ? 'protected' : 'zone off');
+      chip.classList.toggle('dark', !!blank[k] || unprotected);
+    }
+    $('zoneCounts').innerHTML = ['A', 'B'].map((k) =>
+      `<span class="chip">${k}: far ${zones[k].F.length} · near ${zones[k].N.length}</span>`).join('');
+    const vk = viewHead();
+    $('shapeList').innerHTML = zones[vk].P.map((_, i) =>
+      `<span class="chip">${vk} shape ${i + 1}<button data-i="${i}" aria-label="Delete shape ${i + 1}">×</button></span>`).join('')
+      || `<span class="chip">${vk}: no shapes yet</span>`;
+    $('saveShapeBtn').disabled = !drawing || drawing.pts.length < 3;
+    $('undoPtBtn').disabled = !drawing || !drawing.pts.length;
+    $('cancelShapeBtn').disabled = !drawing;
+    $('newShapeBtn').disabled = !!drawing;
+    $('pad').classList.toggle('drawing', !!drawing);
+    $('drawHint').textContent = drawing
+      ? `Drawing on head ${drawing.head}: ${drawing.pts.length} corner${drawing.pts.length === 1 ? '' : 's'}` +
+        (drawing.pts.length < 3 ? ' – tap the pad to add corners' : ' – tap Save shape when done') : '';
+    $('zMargin').value = zcfg.margin; $('zMarginOut').textContent = zcfg.margin;
+    $('zSettle').value = zcfg.settle; $('zSettleOut').textContent = zcfg.settle + ' ms';
+    if (document.activeElement !== $('zPanRate')) $('zPanRate').value = zcfg.panRate;
+    if (document.activeElement !== $('zTiltRate')) $('zTiltRate').value = zcfg.tiltRate;
+    $('knob').classList.toggle('dark', !!blank[viewHead()]);
+    $('autoWarn').style.display = heads[viewHead()][CH.auto] >= 60 ? 'block' : 'none';
+    drawZone();
+  }
+  window.addEventListener('resize', drawZone);
+
+  function parseZoneLine(line) {
+    let m;
+    if ((m = line.match(/^Z ([AB]) ([FN])((?: \d+,\d+)*)$/))) {
+      zones[m[1]][m[2]] = m[3].trim() ? m[3].trim().split(' ').map((s) => s.split(',').map(Number)) : [];
+    } else if ((m = line.match(/^ZC (\d+) (\d+) (\d+) (\d+) (\d+)(?: (\d+))?$/))) {
+      Object.assign(zcfg, { enabled: +m[1], margin: +m[2], settle: +m[3], panRate: +m[4], tiltRate: +m[5],
+                            allowAuto: +(m[6] || 0) });
+    } else if ((m = line.match(/^ZPN ([AB]) (\d+)$/))) {
+      zones[m[1]].P.length = +m[2];
+      for (let i = 0; i < +m[2]; i++) zones[m[1]].P[i] = zones[m[1]].P[i] || [];
+    } else if ((m = line.match(/^ZP ([AB]) (\d+)((?: \d+,\d+)+)$/))) {
+      zones[m[1]].P[+m[2]] = m[3].trim().split(' ').map((s) => s.split(',').map(Number));
+    } else if ((m = line.match(/^ZB ([AB]) ([01])$/))) {
+      blank[m[1]] = m[2] === '1';
+    } else return false;
+    renderZoneUi();
+    return true;
+  }
+
+  const singleHead = () => {
+    if (target === 'both') { log('pick Head A or Head B first – each head gets its own zone'); return null; }
+    return target;
+  };
+  $('setupBtn').addEventListener('click', () => send(zcfg.enabled ? 'ze 0' : 'ze 1'));
+  $('markFarBtn').addEventListener('click', () => { const k = singleHead(); if (k) markPoint(k, 'F'); });
+  $('markNearBtn').addEventListener('click', () => { const k = singleHead(); if (k) markPoint(k, 'N'); });
+  $('clearZoneBtn').addEventListener('click', () => { const k = singleHead(); if (k) send('zc ' + k); });
+  // make sure the ESP32 has the latest position before it records the point
+  function markPoint(k, edge) { dirty.add(k); setTimeout(() => send('zm ' + k + ' ' + edge), 120); }
+
+  $('zMargin').addEventListener('input', (e) => { zcfg.margin = +e.target.value; renderZoneUi(); });
+  $('zSettle').addEventListener('input', (e) => { zcfg.settle = +e.target.value; renderZoneUi(); });
+  $('zSaveBtn').addEventListener('click', () => {
+    zcfg.panRate = +$('zPanRate').value || zcfg.panRate; zcfg.tiltRate = +$('zTiltRate').value || zcfg.tiltRate;
+    send(`zs ${zcfg.margin} ${zcfg.settle} ${zcfg.panRate} ${zcfg.tiltRate}`);
+  });
+
+  // tabs: aim & mark vs draw shapes
+  $('zoneTabs').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    for (const x of $('zoneTabs').children) x.classList.toggle('on', x === b);
+    $('aimPanel').style.display = b.dataset.m === 'aim' ? '' : 'none';
+    $('drawPanel').style.display = b.dataset.m === 'draw' ? '' : 'none';
+    if (b.dataset.m === 'aim') drawing = null;
+    renderZoneUi();
+  });
+  $('newShapeBtn').addEventListener('click', () => {
+    const k = singleHead(); if (!k) return;
+    drawing = { head: k, pts: [] }; renderZoneUi();
+  });
+  $('undoPtBtn').addEventListener('click', () => { if (drawing) { drawing.pts.pop(); renderZoneUi(); } });
+  $('cancelShapeBtn').addEventListener('click', () => { drawing = null; renderZoneUi(); });
+  $('saveShapeBtn').addEventListener('click', () => {
+    if (!drawing || drawing.pts.length < 3) return;
+    send('zp ' + drawing.head + ' ' + drawing.pts.map(([p, t]) => p + ',' + t).join(' '));
+    drawing = null; renderZoneUi();
+  });
+  $('shapeList').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-i]'); if (!b) return;
+    send('zx ' + viewHead() + ' ' + b.dataset.i);
+  });
+  const addCorner = (e) => {
+    const r = pad.getBoundingClientRect();
+    const x = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    const y = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    if (drawing.pts.length >= 12) { log('max 12 corners per shape'); return; }
+    drawing.pts.push([Math.round(x * 65535), Math.round((1 - y) * 65535)]);
+    renderZoneUi();
+  };
+
+  // motor speed stopwatch
+  let measT0 = 0;
+  $('measStart').addEventListener('click', () => {
+    if (!singleHead()) return;
+    setCh('speed', 0); setCh($('measAxis').value, 0); $('measOut').textContent = 'wait until it stops, then tap Go!';
+  });
+  $('measGo').addEventListener('click', () => {
+    if (!singleHead()) return;
+    setCh($('measAxis').value, 65535); measT0 = performance.now(); $('measOut').textContent = 'moving… tap Arrived when it stops';
+  });
+  $('measDone').addEventListener('click', () => {
+    if (!measT0) return;
+    const sec = (performance.now() - measT0) / 1000; measT0 = 0;
+    const rate = Math.round(65535 / sec * 0.8);          // 20% slower than measured = conservative
+    const axis = $('measAxis').value;
+    if (axis === 'pan') zcfg.panRate = rate; else zcfg.tiltRate = rate;
+    $('zPanRate').value = zcfg.panRate; $('zTiltRate').value = zcfg.tiltRate;
+    $('measOut').textContent = `${axis}: full travel ${sec.toFixed(2)} s → ${rate} units/s (tap Save zone settings)`;
+  });
+
   // ---- Reading / writing head state ----
   const editHeads = () => (target === 'both' ? ['A', 'B'] : [target]);
   const viewHead = () => (target === 'B' ? 'B' : 'A');
@@ -274,6 +563,7 @@
     $('patternOut').textContent = vals.pattern;
     $('auto').value = [...$('auto').options].some(o => +o.value === h[CH.auto]) ? h[CH.auto] : 0;
     placeKnob($('knob'), h);
+    $('knob').classList.toggle('dark', !!blank[viewHead()]);
     const other = heads[viewHead() === 'A' ? 'B' : 'A'];
     $('knobB').style.display = target === 'both' ? 'none' : 'block';
     placeKnob($('knobB'), other);
@@ -285,7 +575,24 @@
   }
 
   for (const s of sliders) $(s).addEventListener('input', (e) => setCh(s, +e.target.value));
-  $('auto').addEventListener('change', (e) => setCh('auto', +e.target.value));
+  const zoneOn = (k) => zcfg.enabled && ((zones[k].F.length && zones[k].N.length) || zones[k].P.length);
+  $('auto').addEventListener('change', (e) => {
+    const v = +e.target.value;
+    if (v >= 60 && !zcfg.allowAuto && editHeads().some(zoneOn)) {
+      if (!confirm('Built-in Auto/Sound programs move the heads on their own and ignore the eye-protection zone.\n\nRun it anyway, without eye protection?')) {
+        render(); return;                       // put the dropdown back
+      }
+      send('za 1');
+    }
+    setCh('auto', v);
+    if (v < 60 && zcfg.allowAuto && heads.A[CH.auto] < 60 && heads.B[CH.auto] < 60) send('za 0');
+    renderZoneUi();
+  });
+  $('resetBtn').addEventListener('click', () => {
+    const who = target === 'both' ? 'all' : target;
+    const label = target === 'both' ? 'both heads' : 'head ' + target;
+    if (confirm('Reset ' + label + '? It will re-home (pan/tilt sweep to its end stops). The beam is kept dark for 15 s.')) send('reset ' + who);
+  });
 
   // XY pad
   const pad = $('pad');
@@ -296,15 +603,18 @@
     setCh('pan', Math.round(x * 65535));
     setCh('tilt', Math.round((1 - y) * 65535));
   };
-  pad.addEventListener('pointerdown', (e) => { pad.setPointerCapture(e.pointerId); padMove(e); });
-  pad.addEventListener('pointermove', (e) => { if (pad.hasPointerCapture(e.pointerId)) padMove(e); });
+  pad.addEventListener('pointerdown', (e) => {
+    if (drawing) { if (drawing.head !== viewHead()) { log('switch back to head ' + drawing.head + ' to keep drawing'); return; } addCorner(e); return; }
+    pad.setPointerCapture(e.pointerId); padMove(e);
+  });
+  pad.addEventListener('pointermove', (e) => { if (!drawing && pad.hasPointerCapture(e.pointerId)) padMove(e); });
 
   // Target selector
   $('target').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
     target = b.dataset.t;
     for (const x of $('target').children) x.classList.toggle('on', x === b);
-    render();
+    render(); renderZoneUi();
   });
 
   // ---- Presets ----
@@ -382,6 +692,7 @@
       setStatus('Connected to ' + (device.name || 'device'), true);
       log('connected');
       send('d');   // read back current DMX state
+      send('zg');  // and the eye-protection zones
     } catch (err) {
       if (err.name === 'NotFoundError') { setStatus('No device chosen', false); }
       else { setStatus('Error: ' + err.message, false); device = null; }
@@ -394,6 +705,7 @@
     while ((i = rxBuf.indexOf('\n')) >= 0) {
       const line = rxBuf.slice(0, i).trim(); rxBuf = rxBuf.slice(i + 1);
       if (!line) continue;
+      if (parseZoneLine(line)) { if (!/^(Z |ZP)/.test(line)) log(line); continue; }
       log(line);
       const m = line.match(/^([AB]):((?:\s+\d+){11})$/);   // reply to "d"
       if (m) { heads[m[1]] = m[2].trim().split(/\s+/).map(Number); render(); }
@@ -432,6 +744,7 @@
 
   renderPresets();
   render();
+  renderZoneUi();
 
   // Offline support: cache the app on first visit (only works when served over https)
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
